@@ -95,16 +95,68 @@ pub unsafe fn micro_8x8_f64(
     ci: usize,
     cj: usize,
 ) {
-    // Two __m256d halves (rows 0..4, 4..8) per C column.
-    let mut lo = [_mm256_setzero_pd(); 8];
-    let mut hi = [_mm256_setzero_pd(); 8];
+    let va = _mm256_set1_pd(alpha);
+    if mr == 8 && nr == 8 {
+        // Process the 8 columns in two groups of 4: only 8 __m256d accumulators
+        // (lo[4]+hi[4]) live at once instead of 16, leaving YMM registers free
+        // for the A-column and B-broadcast operands. The 16-accumulator version
+        // spilled the whole register file every K iteration (the f32 tile is
+        // fine — it needs only 8). Mirrors the NEON DGEMM fix.
+        col_group_8x4(kc, va, ap, bp, c, ci, cj, ldc, 0);
+        col_group_8x4(kc, va, ap, bp, c, ci, cj, ldc, 4);
+    } else {
+        // Edge tile: compute the live mr×nr corner with scalar spill.
+        let mut lo = [_mm256_setzero_pd(); 8];
+        let mut hi = [_mm256_setzero_pd(); 8];
+        let mut p = 0;
+        while p < kc {
+            let a = ap.add(p * 8);
+            let b = bp.add(p * 8);
+            let a_lo = _mm256_loadu_pd(a);
+            let a_hi = _mm256_loadu_pd(a.add(4));
+            for s in 0..nr {
+                let bs = _mm256_broadcast_sd(&*b.add(s));
+                lo[s] = _mm256_fmadd_pd(a_lo, bs, lo[s]);
+                hi[s] = _mm256_fmadd_pd(a_hi, bs, hi[s]);
+            }
+            p += 1;
+        }
+        let mut buf = [0.0f64; 8];
+        for s in 0..nr {
+            _mm256_storeu_pd(buf.as_mut_ptr(), lo[s]);
+            _mm256_storeu_pd(buf.as_mut_ptr().add(4), hi[s]);
+            let col = c.add(ci + (cj + s) * ldc);
+            for r in 0..mr {
+                *col.add(r) += alpha * buf[r];
+            }
+        }
+    }
+}
 
+/// Accumulate and write back an `8×4` slab of the C tile (rows 0..8, columns
+/// `cj+col0 .. cj+col0+4`). 8 live __m256d accumulators — no register spill.
+#[inline]
+#[target_feature(enable = "avx2,fma")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn col_group_8x4(
+    kc: usize,
+    va: __m256d,
+    ap: *const f64,
+    bp: *const f64,
+    c: *mut f64,
+    ci: usize,
+    cj: usize,
+    ldc: usize,
+    col0: usize,
+) {
+    let mut lo = [_mm256_setzero_pd(); 4];
+    let mut hi = [_mm256_setzero_pd(); 4];
     let mut p = 0;
     while p < kc {
         let a = ap.add(p * 8);
-        let b = bp.add(p * 8);
-        let a_lo = _mm256_loadu_pd(a); // rows 0..4
-        let a_hi = _mm256_loadu_pd(a.add(4)); // rows 4..8
+        let b = bp.add(p * 8 + col0);
+        let a_lo = _mm256_loadu_pd(a);
+        let a_hi = _mm256_loadu_pd(a.add(4));
         macro_rules! col {
             ($s:literal) => {{
                 let bs = _mm256_broadcast_sd(&*b.add($s));
@@ -116,31 +168,13 @@ pub unsafe fn micro_8x8_f64(
         col!(1);
         col!(2);
         col!(3);
-        col!(4);
-        col!(5);
-        col!(6);
-        col!(7);
         p += 1;
     }
-
-    let va = _mm256_set1_pd(alpha);
-    if mr == 8 && nr == 8 {
-        for s in 0..8 {
-            let cptr = c.add(ci + (cj + s) * ldc);
-            let c_lo = _mm256_loadu_pd(cptr);
-            let c_hi = _mm256_loadu_pd(cptr.add(4));
-            _mm256_storeu_pd(cptr, _mm256_fmadd_pd(va, lo[s], c_lo));
-            _mm256_storeu_pd(cptr.add(4), _mm256_fmadd_pd(va, hi[s], c_hi));
-        }
-    } else {
-        let mut buf = [0.0f64; 8];
-        for s in 0..nr {
-            _mm256_storeu_pd(buf.as_mut_ptr(), lo[s]);
-            _mm256_storeu_pd(buf.as_mut_ptr().add(4), hi[s]);
-            let col = c.add(ci + (cj + s) * ldc);
-            for r in 0..mr {
-                *col.add(r) += alpha * buf[r];
-            }
-        }
+    for s in 0..4 {
+        let cptr = c.add(ci + (cj + col0 + s) * ldc);
+        let c_lo = _mm256_loadu_pd(cptr);
+        let c_hi = _mm256_loadu_pd(cptr.add(4));
+        _mm256_storeu_pd(cptr, _mm256_fmadd_pd(va, lo[s], c_lo));
+        _mm256_storeu_pd(cptr.add(4), _mm256_fmadd_pd(va, hi[s], c_hi));
     }
 }
