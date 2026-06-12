@@ -418,12 +418,13 @@ fn micro_tile<T: Float>(
     micro_tile_scalar(mr, nr, kc, alpha, ap, bp, c, ldc, ci, cj);
 }
 
-/// Portable register-blocked microkernel: the no-SIMD fallback, and the runtime
-/// fallback x86-64 uses when AVX2 isn't present. Dead only on aarch64 (NEON is
-/// unconditional there).
+/// Portable register-blocked microkernel: the no-SIMD fallback for targets
+/// without a SIMD microkernel. On aarch64 (NEON) and x86-64 (AVX2 + the
+/// `micro_raw_scalar` fallback) the dispatch never reaches this, so it's only
+/// compiled on other architectures.
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
 #[allow(clippy::too_many_arguments)]
 #[inline]
-#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
 fn micro_tile_scalar<T: Float>(
     mr: usize,
     nr: usize,
