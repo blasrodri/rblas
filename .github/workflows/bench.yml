@@ -1,0 +1,41 @@
+name: bench
+
+# GEMM benchmarks on a real AVX2 x86-64 runner. Runs on demand and on pushes
+# that touch the kernels/benches. GitHub runners are shared and noisy, so trust
+# the rblas-vs-matrixmultiply *ratio* (same machine, same run) over absolute
+# GFLOP/s.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "src/kernel/**"
+      - "benches/**"
+      - ".github/workflows/bench.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bench-x86:
+    runs-on: ubuntu-latest # x86-64 with AVX2 + FMA
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: CPU model + features
+        run: |
+          lscpu | grep -iE "model name|^flags" | sed 's/flags.*\(avx2\|fma\).*/has avx2+fma/' || true
+          lscpu | grep -i flags | tr ' ' '\n' | grep -E '^(avx2|fma|avx512f)$' | sort -u
+      - name: GEMM vs matrixmultiply (AVX2 path)
+        # Short measurement window — we want ratios, not publication numbers.
+        run: |
+          cargo bench --bench compare -- \
+            --warm-up-time 1 --measurement-time 3 \
+            'vs_matrixmultiply/(rblas|matrixmultiply)/(256|512|1024)' \
+            | tee bench.txt
+      - name: Summarize
+        if: always()
+        run: |
+          echo '## GEMM throughput on this x86-64 runner' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          grep -E 'sgemm_vs|dgemm_vs|thrpt:' bench.txt >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
