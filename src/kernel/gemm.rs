@@ -661,8 +661,9 @@ mod tests {
 
     /// Directly exercise the AVX2 microkernel intrinsics against a scalar tile.
     /// Self-skips when the host lacks AVX2/FMA (so it's a no-op on CI runners
-    /// without the feature, but real coverage where it exists).
-    #[cfg(target_arch = "x86_64")]
+    /// without the feature, but real coverage where it exists). Gated to match
+    /// the `gemm_avx2` module's cfg exactly (x86-64 + std).
+    #[cfg(all(target_arch = "x86_64", feature = "std"))]
     #[test]
     fn avx2_microkernel_matches_scalar() {
         if !(std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma")) {
