@@ -33,6 +33,19 @@ f64 microkernel that processes 8 columns in two 4-wide groups (16 live
 accumulators instead of 32, no register spill — 1024³ DGEMM went 68% → ~100%).
 Core peak ≈ 100 GFLOP/s f32 / ~50 GFLOP/s f64 per P-core.
 
+**x86-64 (AVX2)**, verified on the CI runner (`cargo bench --bench compare`).
+The same register-spill fix was applied to the AVX2 f64 kernel — DGEMM there
+went ~69% → ~90% of matrixmultiply:
+
+| Routine     | Size  | rblas / matrixmultiply |
+|-------------|-------|------------------------|
+| SGEMM (f32) | 1024³ | ~96%                   |
+| DGEMM (f64) | 1024³ | ~90%                   |
+
+> These compare against `matrixmultiply`, a pure-Rust *peer*. For the honest bar
+> — **faer** (state-of-the-art pure Rust) and **OpenBLAS** (assembly-tuned) — see
+> the `baselines` bench (`--features bench-baselines`) and the `bench` CI job.
+
 ### Multi-threading (`--features threads`)
 
 The macrokernel partitions C into column chunks (≈4 per worker for load balance)

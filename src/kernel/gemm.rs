@@ -32,8 +32,21 @@ use alloc::vec::Vec;
 /// dominates small-matrix runtime. Without `std` it allocates fresh each call.
 ///
 /// `#[doc(hidden)]`: implementation detail, not stable surface.
+///
+/// Also carries the per-type microkernel **tile dimensions** `MR`×`NR` (rows ×
+/// columns of C computed per microkernel call). These must exactly match the
+/// hand-written SIMD kernel's tile on each arch: the packer lays A out in
+/// `MR`-row panels and B in `NR`-column panels, and the macrokernel walks the
+/// packed buffers in `MR`×`NR` steps. Wider tiles raise arithmetic intensity
+/// (more FMAs per load), which is the main lever for closing the gap to tuned
+/// BLAS — bounded by the register file (16 YMM on AVX2, 32 on NEON).
 #[doc(hidden)]
 pub trait Scratch: Sized {
+    /// Microkernel tile row count (rows of C per call).
+    const MR: usize;
+    /// Microkernel tile column count (columns of C per call).
+    const NR: usize;
+
     /// Run `f` with packing buffers of length ≥ `a_len` / `b_len`.
     fn with_scratch<R>(
         a_len: usize,
@@ -44,12 +57,14 @@ pub trait Scratch: Sized {
 
 #[cfg(feature = "std")]
 macro_rules! impl_scratch {
-    ($ty:ty, $key:ident) => {
+    ($ty:ty, $key:ident, $mr:expr, $nr:expr) => {
         thread_local! {
             static $key: core::cell::RefCell<(Vec<$ty>, Vec<$ty>)> =
                 const { core::cell::RefCell::new((Vec::new(), Vec::new())) };
         }
         impl Scratch for $ty {
+            const MR: usize = $mr;
+            const NR: usize = $nr;
             #[inline]
             fn with_scratch<R>(
                 a_len: usize,
@@ -69,9 +84,9 @@ macro_rules! impl_scratch {
 }
 
 #[cfg(feature = "std")]
-impl_scratch!(f32, SCRATCH_F32);
+impl_scratch!(f32, SCRATCH_F32, MR_F32, NR_F32);
 #[cfg(feature = "std")]
-impl_scratch!(f64, SCRATCH_F64);
+impl_scratch!(f64, SCRATCH_F64, MR_F64, NR_F64);
 
 /// Ensure `v` has length ≥ `len`, zero-filling any reused/new region so the
 /// MR/NR zero-padding the packers rely on is always present.
@@ -89,24 +104,64 @@ fn grow_zeroed<T: Float>(v: &mut Vec<T>, len: usize) {
 
 // no_std: no thread-locals, so just allocate (still correct, just not reused).
 #[cfg(not(feature = "std"))]
-impl<T: Float> Scratch for T {
-    #[inline]
-    fn with_scratch<R>(
-        a_len: usize,
-        b_len: usize,
-        f: impl FnOnce(&mut [Self], &mut [Self]) -> R,
-    ) -> R {
-        let mut pa = alloc::vec![T::ZERO; a_len];
-        let mut pb = alloc::vec![T::ZERO; b_len];
-        f(&mut pa, &mut pb)
-    }
+macro_rules! impl_scratch_nostd {
+    ($ty:ty, $mr:expr, $nr:expr) => {
+        impl Scratch for $ty {
+            const MR: usize = $mr;
+            const NR: usize = $nr;
+            #[inline]
+            fn with_scratch<R>(
+                a_len: usize,
+                b_len: usize,
+                f: impl FnOnce(&mut [Self], &mut [Self]) -> R,
+            ) -> R {
+                let mut pa = alloc::vec![Self::ZERO; a_len];
+                let mut pb = alloc::vec![Self::ZERO; b_len];
+                f(&mut pa, &mut pb)
+            }
+        }
+    };
 }
 
-/// Register-block dimensions of the microkernel (rows × cols of C per call).
-/// Chosen to fit the accumulator tile in vector registers. Tunable per arch;
-/// these are conservative values that work for NEON (32× 128-bit) and AVX2.
-const MR: usize = 8;
-const NR: usize = 8;
+#[cfg(not(feature = "std"))]
+impl_scratch_nostd!(f32, MR_F32, NR_F32);
+#[cfg(not(feature = "std"))]
+impl_scratch_nostd!(f64, MR_F64, NR_F64);
+
+// Per-(type, arch) microkernel tile dimensions, surfaced through `Scratch::MR/NR`
+// and consumed by the packer + macrokernel. Each must match the hand-written
+// SIMD kernel's tile on that arch.
+//
+// AVX2 (16 YMM regs): f32 16×6 = 12 acc vectors (rows in 2 ymm, 6 broadcast
+// cols); f64 8×6 = 12 acc vectors (8 rows = 2 ymm of 4). Both leave registers
+// for the A vectors + B broadcast, raising FMA-per-load over the old 8×8.
+// NEON (32 regs) and the scalar fallback keep the proven 8×8 tile.
+#[cfg(target_arch = "x86_64")]
+const MR_F32: usize = 16;
+#[cfg(target_arch = "x86_64")]
+const NR_F32: usize = 6;
+#[cfg(target_arch = "x86_64")]
+const MR_F64: usize = 8;
+#[cfg(target_arch = "x86_64")]
+const NR_F64: usize = 6;
+
+#[cfg(not(target_arch = "x86_64"))]
+const MR_F32: usize = 8;
+#[cfg(not(target_arch = "x86_64"))]
+const NR_F32: usize = 8;
+#[cfg(not(target_arch = "x86_64"))]
+const MR_F64: usize = 8;
+#[cfg(not(target_arch = "x86_64"))]
+const NR_F64: usize = 8;
+
+/// Upper bounds on any tile dimension, used to size fixed scratch arrays in the
+/// scalar microkernels (associated consts can't size arrays in a generic fn).
+/// Only the scalar-fallback arches reference these (x86 no-AVX2 path, or targets
+/// with no SIMD kernel), so they're unused on aarch64.
+#[cfg(not(target_arch = "aarch64"))]
+const MAX_MR: usize = 16;
+#[cfg(not(target_arch = "aarch64"))]
+const MAX_NR: usize = 8;
 
 /// Cache-blocking parameters. Sized so that an `MC×KC` packed-A panel fits L2
 /// and a `KC×NC` packed-B panel fits L3, with a `KC×NR` slice of B in L1.
@@ -158,7 +213,7 @@ pub fn gemm_contig<T: Float>(
         // Parallelize once the problem is big enough that thread overhead pays
         // off: enough columns to fill the pool, and enough total work that the
         // packing/spawn cost is amortized.
-        let big_enough = n >= 2 * NR && (m * n * k) >= 1 << 18;
+        let big_enough = n >= 2 * T::NR && (m * n * k) >= 1 << 18;
         if big_enough && rayon::current_num_threads() > 1 {
             return gemm_parallel(m, n, k, alpha, a, lda, b, ldb, c, ldc);
         }
@@ -194,8 +249,8 @@ fn gemm_band<T: Float>(
     ldc: usize,
 ) {
     // Per-band (hence per-thread) packing scratch, right-sized to the blocks.
-    let a_cap = round_up(MC.min(m), MR) * KC.min(k);
-    let b_cap = KC.min(k) * round_up(nc, NR);
+    let a_cap = round_up(MC.min(m), T::MR) * KC.min(k);
+    let b_cap = KC.min(k) * round_up(nc, T::NR);
 
     T::with_scratch(a_cap, b_cap, |pack_a, pack_b| {
         let mut pc = 0;
@@ -240,7 +295,7 @@ fn gemm_parallel<T: Float>(
     let threads = rayon::current_num_threads();
     let target_tasks = (threads * 4).max(1);
     let mut chunk_cols = n.div_ceil(target_tasks);
-    chunk_cols = round_up(chunk_cols.max(NR), NR).min(NC);
+    chunk_cols = round_up(chunk_cols.max(T::NR), T::NR).min(NC);
 
     // Column-major: a `chunk_cols`-column slab is `chunk_cols*ldc` consecutive
     // elements, so `chunks_mut` carves disjoint, ordered slabs.
@@ -297,7 +352,7 @@ fn pack_a_panel<T: Float>(
     let mut dst = 0;
     let mut i = 0;
     while i < mc {
-        let mr = MR.min(mc - i);
+        let mr = T::MR.min(mc - i);
         for p in 0..kc {
             let acol = pc + p;
             for r in 0..mr {
@@ -306,12 +361,12 @@ fn pack_a_panel<T: Float>(
             }
             // Zero-pad the partial row-panel up to MR so the microkernel can
             // always assume a full MR stride.
-            for _ in mr..MR {
+            for _ in mr..T::MR {
                 pack[dst] = T::ZERO;
                 dst += 1;
             }
         }
-        i += MR;
+        i += T::MR;
     }
 }
 
@@ -328,19 +383,19 @@ fn pack_b_panel<T: Float>(
     let mut dst = 0;
     let mut j = 0;
     while j < nc {
-        let nr = NR.min(nc - j);
+        let nr = T::NR.min(nc - j);
         for p in 0..kc {
             let brow = pc + p;
             for c in 0..nr {
                 pack[dst] = b[brow + (jc + j + c) * ldb];
                 dst += 1;
             }
-            for _ in nr..NR {
+            for _ in nr..T::NR {
                 pack[dst] = T::ZERO;
                 dst += 1;
             }
         }
-        j += NR;
+        j += T::NR;
     }
 }
 
@@ -360,16 +415,16 @@ fn macrokernel<T: Float>(
 ) {
     let mut j = 0;
     while j < nc {
-        let nr = NR.min(nc - j);
-        let bp = &pack_b[(j / NR) * (kc * NR)..];
+        let nr = T::NR.min(nc - j);
+        let bp = &pack_b[(j / T::NR) * (kc * T::NR)..];
         let mut i = 0;
         while i < mc {
-            let mr = MR.min(mc - i);
-            let ap = &pack_a[(i / MR) * (kc * MR)..];
+            let mr = T::MR.min(mc - i);
+            let ap = &pack_a[(i / T::MR) * (kc * T::MR)..];
             micro_tile(mr, nr, kc, alpha, ap, bp, c, ldc, ic + i, jc + j);
-            i += MR;
+            i += T::MR;
         }
-        j += NR;
+        j += T::NR;
     }
 }
 
@@ -437,14 +492,16 @@ fn micro_tile_scalar<T: Float>(
     ci: usize,
     cj: usize,
 ) {
-    let mut acc = [[T::ZERO; NR]; MR];
+    // Fixed max-size accumulator (associated consts can't size arrays in a
+    // generic fn); loop bounds use the per-type tile T::MR × T::NR.
+    let mut acc = [[T::ZERO; MAX_NR]; MAX_MR];
     for p in 0..kc {
-        let a_off = p * MR;
-        let b_off = p * NR;
-        for r in 0..MR {
+        let a_off = p * T::MR;
+        let b_off = p * T::NR;
+        for r in 0..T::MR {
             let ar = ap[a_off + r];
             let accr = &mut acc[r];
-            for s in 0..NR {
+            for s in 0..T::NR {
                 accr[s] = ar.mul_add(bp[b_off + s], accr[s]);
             }
         }
@@ -543,7 +600,7 @@ impl MicroKernel for f32 {
         // macro) fall back to the scalar tile unconditionally.
         #[cfg(feature = "std")]
         if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
-            crate::kernel::gemm_avx2::micro_8x8_f32(mr, nr, kc, alpha, ap, bp, c, ldc, ci, cj);
+            crate::kernel::gemm_avx2::micro_16x6_f32(mr, nr, kc, alpha, ap, bp, c, ldc, ci, cj);
             return;
         }
         micro_raw_scalar(mr, nr, kc, alpha, ap, bp, c, ldc, ci, cj);
@@ -567,7 +624,7 @@ impl MicroKernel for f64 {
     ) {
         #[cfg(feature = "std")]
         if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
-            crate::kernel::gemm_avx2::micro_8x8_f64(mr, nr, kc, alpha, ap, bp, c, ldc, ci, cj);
+            crate::kernel::gemm_avx2::micro_8x6_f64(mr, nr, kc, alpha, ap, bp, c, ldc, ci, cj);
             return;
         }
         micro_raw_scalar(mr, nr, kc, alpha, ap, bp, c, ldc, ci, cj);
@@ -593,13 +650,13 @@ unsafe fn micro_raw_scalar<T: Float>(
     ci: usize,
     cj: usize,
 ) {
-    let mut acc = [[T::ZERO; NR]; MR];
+    let mut acc = [[T::ZERO; MAX_NR]; MAX_MR];
     for p in 0..kc {
-        let a_off = p * MR;
-        let b_off = p * NR;
-        for r in 0..MR {
+        let a_off = p * T::MR;
+        let b_off = p * T::NR;
+        for r in 0..T::MR {
             let ar = *ap.add(a_off + r);
-            for s in 0..NR {
+            for s in 0..T::NR {
                 acc[r][s] = ar.mul_add(*bp.add(b_off + s), acc[r][s]);
             }
         }
@@ -671,18 +728,20 @@ mod tests {
             return;
         }
         let kc = 11usize;
-        // Packed panels: ap[p*MR + r], bp[p*NR + s].
-        let ap: Vec<f32> = (0..kc * MR).map(|i| (i as f32 * 0.123).sin()).collect();
-        let bp: Vec<f32> = (0..kc * NR).map(|i| (i as f32 * 0.077).cos()).collect();
-        let ldc = MR;
+        // f32 tile dims (16×6 on x86). Packed panels: ap[p*MR + r], bp[p*NR + s].
+        let mr = MR_F32;
+        let nr = NR_F32;
+        let ap: Vec<f32> = (0..kc * mr).map(|i| (i as f32 * 0.123).sin()).collect();
+        let bp: Vec<f32> = (0..kc * nr).map(|i| (i as f32 * 0.077).cos()).collect();
+        let ldc = mr;
         let alpha = 1.5f32;
 
-        let mut c_avx = vec![0.5f32; MR * NR];
+        let mut c_avx = vec![0.5f32; mr * nr];
         let mut c_ref = c_avx.clone();
         unsafe {
-            crate::kernel::gemm_avx2::micro_8x8_f32(
-                MR,
-                NR,
+            crate::kernel::gemm_avx2::micro_16x6_f32(
+                mr,
+                nr,
                 kc,
                 alpha,
                 ap.as_ptr(),
@@ -693,8 +752,8 @@ mod tests {
                 0,
             );
             micro_raw_scalar(
-                MR,
-                NR,
+                mr,
+                nr,
                 kc,
                 alpha,
                 ap.as_ptr(),
