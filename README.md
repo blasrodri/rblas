@@ -1,7 +1,12 @@
 # rblas
 
+[![CI](https://github.com/blasrodri/rblas/actions/workflows/ci.yml/badge.svg)](https://github.com/blasrodri/rblas/actions/workflows/ci.yml)
+
 A pure-Rust, competitive BLAS (Basic Linear Algebra Subprograms). No C, no
 Fortran, no `unsafe` outside the arch-gated SIMD kernels.
+
+CI runs the test suite on x86-64 (AVX2 verified on real hardware) and aarch64
+(NEON), plus `no_std` builds — see the badge above.
 
 ## Status
 
