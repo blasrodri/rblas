@@ -18,7 +18,8 @@ use crate::Float;
 
 mod scalar;
 
-#[cfg(target_arch = "x86_64")]
+// AVX2 paths are reached only through runtime detection, which needs `std`.
+#[cfg(all(target_arch = "x86_64", feature = "std"))]
 mod avx2;
 
 #[cfg(target_arch = "aarch64")]
@@ -27,7 +28,7 @@ mod neon;
 #[cfg(target_arch = "aarch64")]
 mod gemm_neon;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "std"))]
 mod gemm_avx2;
 
 pub mod gemm;
@@ -94,7 +95,8 @@ macro_rules! impl_element {
         impl Element for $ty {
             #[inline]
             fn axpy(alpha: Self, x: &[Self], y: &mut [Self]) {
-                #[cfg(target_arch = "x86_64")]
+                // Runtime feature detection needs `std`; no_std x86 → scalar.
+                #[cfg(all(target_arch = "x86_64", feature = "std"))]
                 {
                     if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma")
                     {
@@ -113,7 +115,7 @@ macro_rules! impl_element {
 
             #[inline]
             fn dot(x: &[Self], y: &[Self]) -> Self {
-                #[cfg(target_arch = "x86_64")]
+                #[cfg(all(target_arch = "x86_64", feature = "std"))]
                 {
                     if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma")
                     {
@@ -132,7 +134,7 @@ macro_rules! impl_element {
 
             #[inline]
             fn scal(alpha: Self, x: &mut [Self]) {
-                #[cfg(target_arch = "x86_64")]
+                #[cfg(all(target_arch = "x86_64", feature = "std"))]
                 {
                     if std::is_x86_feature_detected!("avx2") {
                         // SAFETY: guarded by runtime detection of avx2.

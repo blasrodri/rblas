@@ -539,11 +539,14 @@ impl MicroKernel for f32 {
         ci: usize,
         cj: usize,
     ) {
+        // Runtime AVX2 detection needs `std`; under `no_std` (no detection
+        // macro) fall back to the scalar tile unconditionally.
+        #[cfg(feature = "std")]
         if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
             super::gemm_avx2::micro_8x8_f32(mr, nr, kc, alpha, ap, bp, c, ldc, ci, cj);
-        } else {
-            micro_raw_scalar(mr, nr, kc, alpha, ap, bp, c, ldc, ci, cj);
+            return;
         }
+        micro_raw_scalar(mr, nr, kc, alpha, ap, bp, c, ldc, ci, cj);
     }
 }
 
@@ -562,11 +565,12 @@ impl MicroKernel for f64 {
         ci: usize,
         cj: usize,
     ) {
+        #[cfg(feature = "std")]
         if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
             super::gemm_avx2::micro_8x8_f64(mr, nr, kc, alpha, ap, bp, c, ldc, ci, cj);
-        } else {
-            micro_raw_scalar(mr, nr, kc, alpha, ap, bp, c, ldc, ci, cj);
+            return;
         }
+        micro_raw_scalar(mr, nr, kc, alpha, ap, bp, c, ldc, ci, cj);
     }
 }
 
