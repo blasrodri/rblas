@@ -34,17 +34,19 @@ accumulators instead of 32, no register spill — 1024³ DGEMM went 68% → ~100
 Core peak ≈ 100 GFLOP/s f32 / ~50 GFLOP/s f64 per P-core.
 
 **x86-64 (AVX2)**, verified on the CI runner (`cargo bench --bench compare`).
-The same register-spill fix was applied to the AVX2 f64 kernel — DGEMM there
-went ~69% → ~90% of matrixmultiply:
+The AVX2 microkernel uses **wide register tiles** (f32 16×6, f64 8×6) for high
+arithmetic intensity. At 1024³, single-thread:
 
-| Routine     | Size  | rblas / matrixmultiply |
-|-------------|-------|------------------------|
-| SGEMM (f32) | 1024³ | ~96%                   |
-| DGEMM (f64) | 1024³ | ~90%                   |
+| Routine     | rblas        | matrixmultiply | rblas / mm |
+|-------------|--------------|----------------|------------|
+| SGEMM (f32) | ~90 GFLOP/s  | ~75 GFLOP/s    | **121%**   |
+| DGEMM (f64) | ~45 GFLOP/s  | ~39 GFLOP/s    | **115%**   |
 
-> These compare against `matrixmultiply`, a pure-Rust *peer*. For the honest bar
-> — **faer** (state-of-the-art pure Rust) and **OpenBLAS** (assembly-tuned) — see
-> the `baselines` bench (`--features bench-baselines`) and the `bench` CI job.
+> These compare against `matrixmultiply`, a pure-Rust *peer* — rblas now beats it.
+> Against the honest bar, though, there's still a real gap: on the same CI runner,
+> single-thread 1024³, **faer** ≈ 149 / **OpenBLAS** ≈ 137 GFLOP/s SGEMM vs our
+> ~90. Closing the remaining ~1.5× needs prefetch + assembly-grade scheduling.
+> Run the full comparison with `--features bench-baselines` (the `bench` CI job).
 
 ### Multi-threading (`--features threads`)
 
