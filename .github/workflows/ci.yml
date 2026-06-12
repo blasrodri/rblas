@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Format + lint once (host arch is enough for these). `-D warnings` is scoped
+  # to the clippy invocation so third-party dev-dependency warnings can't fail
+  # the build — only our own code is held to the no-warnings bar.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+      - name: clippy (all targets, all features)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  # Build + test on both architectures. The x86_64 runner has AVX2, so the
+  # AVX2 GEMM/Level-1 kernels and the avx2_microkernel_matches_scalar test run
+  # for real here — the coverage we can't get on Apple Silicon locally.
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest # x86_64 — exercises AVX2
+          - os: macos-14 # Apple Silicon (aarch64) — exercises NEON
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Show CPU features (x86)
+        if: runner.os == 'Linux'
+        run: lscpu | grep -i flags | tr ' ' '\n' | grep -E '^(avx2|fma)$' || true
+      - name: Build
+        run: cargo build --verbose
+      - name: Test (default)
+        run: cargo test --verbose
+      - name: Test (release — large correctness)
+        run: cargo test --release --verbose
+      - name: Test (threads feature)
+        run: cargo test --features threads --verbose
+
+  # no_std: build without default features against a bare-metal-ish target to
+  # prove the crate is genuinely no_std-clean (only `alloc` needed).
+  no_std:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf
+      - name: Build no_std (host)
+        run: cargo build --no-default-features --verbose
+      - name: Build no_std (thumbv7em, alloc-only target)
+        run: cargo build --no-default-features --target thumbv7em-none-eabihf --verbose
