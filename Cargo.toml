@@ -14,9 +14,18 @@ std = []
 # Optional multi-threaded GEMM macrokernel (partitions C column-bands over a
 # rayon thread pool). Requires `std`.
 threads = ["std", "dep:rayon"]
+# Enables the `baselines` benchmark, which compares rblas against the real
+# competitors: faer (pure Rust) and OpenBLAS (C/Fortran, built from source).
+# Off by default — OpenBLAS-src needs a C/Fortran toolchain to build.
+bench-baselines = ["dep:faer", "dep:cblas", "dep:openblas-src"]
 
 [dependencies]
 rayon = { version = "1.10", optional = true }
+# Benchmark-only baselines, pulled in by `bench-baselines`. (Cargo can't mark
+# dev-dependencies optional, so these live here behind the feature.)
+faer = { version = "0.24", optional = true, default-features = false, features = ["std"] }
+cblas = { version = "0.5", optional = true }
+openblas-src = { version = "0.10", optional = true, features = ["cblas", "static"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -35,6 +44,11 @@ harness = false
 [[bench]]
 name = "compare"
 harness = false
+
+[[bench]]
+name = "baselines"
+harness = false
+required-features = ["bench-baselines"]
 
 [profile.release]
 opt-level = 3

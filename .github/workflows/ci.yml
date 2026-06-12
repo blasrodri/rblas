@@ -21,8 +21,10 @@ jobs:
           components: rustfmt, clippy
       - name: rustfmt
         run: cargo fmt --all -- --check
-      - name: clippy (all targets, all features)
-        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: clippy (all targets)
+        # `bench-baselines` is intentionally excluded: it builds OpenBLAS from
+        # source (needs a Fortran toolchain) and only feeds the benchmark job.
+        run: cargo clippy --all-targets --features threads -- -D warnings
 
   # Build + test on both architectures. The x86_64 runner has AVX2, so the
   # AVX2 GEMM/Level-1 kernels and the avx2_microkernel_matches_scalar test run

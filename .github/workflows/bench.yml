@@ -39,3 +39,25 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           grep -E 'sgemm_vs|dgemm_vs|thrpt:' bench.txt >> "$GITHUB_STEP_SUMMARY" || true
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+  # The honest bar: rblas vs faer (pure Rust) and OpenBLAS (C/Fortran).
+  # OpenBLAS is built from source, so the runner needs a Fortran toolchain.
+  baselines-x86:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Fortran toolchain (for OpenBLAS-src)
+        run: sudo apt-get update && sudo apt-get install -y gfortran
+      - name: rblas vs faer vs OpenBLAS
+        run: |
+          cargo bench --bench baselines --features bench-baselines -- \
+            --warm-up-time 1 --measurement-time 3 \
+            | tee baselines.txt
+      - name: Summarize
+        if: always()
+        run: |
+          echo '## rblas vs faer vs OpenBLAS (single-thread, x86-64)' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          grep -E '(sgemm|dgemm)/(rblas|faer|openblas)|thrpt:' baselines.txt >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
